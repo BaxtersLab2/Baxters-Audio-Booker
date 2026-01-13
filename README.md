@@ -40,7 +40,7 @@ Then double-click it.
 ## GUI runner (most intuitive)
 If you prefer clicking instead of typing paths, run `run_audio_booker_gui.bat`.
 - Pick input/output folders with Browse buttons
-- Choose a voice from a dropdown (with locale filtering)
+- Choose a language (example: English) and then pick a voice from a scrolling list
 - Click “Run conversion”
 
 ## Audacity (optional polish)

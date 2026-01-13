@@ -59,11 +59,13 @@ class AudioBookerGUI:
         self.filtered_voices: list[VoiceItem] = []
         self.selected_voice_short: str = ""
 
+        self.language_display_to_code: dict[str, str] = {}
+
         self.step_index = 0
 
         self.input_dir = tk.StringVar(value=str(Path.home() / "Desktop"))
         self.output_dir = tk.StringVar(value=_default_output_for(self.input_dir.get()))
-        self.locale_filter = tk.StringVar(value="en-US")
+        self.language_choice = tk.StringVar(value="English (en)")
         self.rate = tk.StringVar(value="+0%")
         self.volume = tk.StringVar(value="+0%")
         self.max_chars = tk.IntVar(value=5500)
@@ -147,21 +149,28 @@ class AudioBookerGUI:
         step = ttk.Frame(parent)
         self.steps.append(step)
 
-        box = ttk.LabelFrame(step, text="Step 2 — Choose a language/region")
+        box = ttk.LabelFrame(step, text="Step 2 — Choose a language")
         box.pack(fill=tk.BOTH, expand=True, padx=pad, pady=pad)
 
-        ttk.Label(box, text="Type a locale to filter voices (examples: en-US, en-GB, fr-FR).").pack(
-            anchor=tk.W, padx=pad, pady=(pad, 2)
+        ttk.Label(box, text="Pick a language. Then click Next to choose a voice.").pack(
+            anchor=tk.W, padx=pad, pady=(pad, 6)
         )
+
+        row = ttk.Frame(box)
+        row.pack(fill=tk.X, padx=pad, pady=(0, 8))
+        ttk.Label(row, text="Language:").pack(side=tk.LEFT)
+        self.language_combo = ttk.Combobox(row, textvariable=self.language_choice, state="readonly")
+        self.language_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
+        self.language_combo.bind("<<ComboboxSelected>>", lambda _e: self._apply_language_filter())
+
         row = ttk.Frame(box)
         row.pack(fill=tk.X, padx=pad, pady=(0, pad))
-        ttk.Entry(row, textvariable=self.locale_filter, width=12).pack(side=tk.LEFT)
-        ttk.Button(row, text="Update voice list", command=self._apply_locale_filter).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(row, text="Update voice list", command=self._apply_language_filter).pack(side=tk.LEFT)
         ttk.Button(row, text="Refresh from internet", command=self._refresh_voices).pack(side=tk.LEFT, padx=(8, 0))
 
         ttk.Label(
             box,
-            text="If you’re not sure: leave it at en-US, click ‘Update voice list’, then Next.",
+            text="Example: choose English to see all English voices.",
         ).pack(anchor=tk.W, padx=pad, pady=(0, pad))
 
     def _build_step_3_voice(self, parent: ttk.Frame, pad: int) -> None:
@@ -221,7 +230,7 @@ class AudioBookerGUI:
 
         titles = [
             "Step 1 of 4: Pick folders",
-            "Step 2 of 4: Choose language/region",
+            "Step 2 of 4: Choose language",
             "Step 3 of 4: Pick a voice",
             "Step 4 of 4: Run",
         ]
@@ -344,9 +353,68 @@ class AudioBookerGUI:
     def _on_voices_loaded(self, voices: list[VoiceItem]) -> None:
         self.voices = voices
         self._log(f"Loaded {len(voices)} voices.")
-        self._apply_locale_filter()
+        self._populate_language_list()
+        self._apply_language_filter()
         self._set_busy(False)
         self.status.set("Ready")
+
+    def _populate_language_list(self) -> None:
+        # Build a nice dropdown from locale prefixes ("en" from "en-US").
+        code_to_name = {
+            "en": "English",
+            "es": "Spanish",
+            "fr": "French",
+            "de": "German",
+            "it": "Italian",
+            "pt": "Portuguese",
+            "nl": "Dutch",
+            "sv": "Swedish",
+            "no": "Norwegian",
+            "da": "Danish",
+            "fi": "Finnish",
+            "pl": "Polish",
+            "cs": "Czech",
+            "tr": "Turkish",
+            "ru": "Russian",
+            "uk": "Ukrainian",
+            "ja": "Japanese",
+            "ko": "Korean",
+            "zh": "Chinese",
+            "ar": "Arabic",
+            "hi": "Hindi",
+        }
+
+        languages: set[str] = set()
+        for v in self.voices:
+            prefix = (v.locale.split("-")[0] if v.locale else "").strip().lower()
+            if prefix:
+                languages.add(prefix)
+
+        # Always offer an "All" option.
+        display_values: list[str] = ["All languages"]
+        self.language_display_to_code = {"All languages": ""}
+
+        for code in sorted(languages):
+            name = code_to_name.get(code, code.upper())
+            display = f"{name} ({code})"
+            display_values.append(display)
+            self.language_display_to_code[display] = code
+
+        # Populate combobox if it exists (it will).
+        try:
+            self.language_combo["values"] = display_values
+        except Exception:
+            return
+
+        # Keep user's selection if still valid; otherwise default to English if present.
+        current = self.language_choice.get()
+        if current in display_values:
+            return
+        english_display = "English (en)"
+        if english_display in display_values:
+            self.language_choice.set(english_display)
+        else:
+            self.language_choice.set(display_values[0])
 
     def _on_voices_failed(self, err: Exception) -> None:
         self._set_busy(False)
@@ -361,11 +429,15 @@ class AudioBookerGUI:
         self._log("Refreshing voice list...")
         self._fetch_voices_threaded()
 
-    def _apply_locale_filter(self) -> None:
-        flt = (self.locale_filter.get() or "").strip().lower()
-        filtered = [v for v in self.voices if (not flt or v.locale.lower() == flt)]
-        if not filtered and flt:
-            filtered = [v for v in self.voices if v.locale.lower().startswith(flt)]
+    def _apply_language_filter(self) -> None:
+        # Filter by language prefix ("en" matches en-US, en-GB, etc.)
+        choice = (self.language_choice.get() or "").strip()
+        lang_code = self.language_display_to_code.get(choice, "")
+
+        if not lang_code:
+            filtered = list(self.voices)
+        else:
+            filtered = [v for v in self.voices if v.locale.lower().startswith(lang_code + "-") or v.locale.lower() == lang_code]
 
         self.filtered_voices = filtered
         self.selected_voice_short = ""
@@ -379,7 +451,7 @@ class AudioBookerGUI:
                 self.voice_list.insert(tk.END, f"{v.friendly_name}  [{v.short_name}]")
 
         if not filtered:
-            self._log(f"No voices matched: {flt!r}")
+            self._log(f"No voices found for selection: {choice!r}")
         else:
             self._log(f"Voices shown: {len(filtered)}")
 
