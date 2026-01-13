@@ -44,6 +44,12 @@ After generating MP3s, you can open them in Audacity to:
 - apply light EQ
 - export final audiobook chapters
 
+## Listing available voices
+Run `list_voices.bat` to print available Edge TTS voices.
+- It creates `venv/` (first run) and installs dependencies.
+- It lets you filter by locale (example: `en-US`).
+- Copy a voice name (example: `en-US-GuyNeural`) into `run_audio_booker.bat` or enter it when using `run_audio_booker_prompt.bat`.
+
 ## Notes
 - This project intentionally keeps everything self-contained in this folder.
 - `venv/` and `output_mp3/` are gitignored.
