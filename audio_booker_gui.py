@@ -152,7 +152,7 @@ class AudioBookerGUI:
         box = ttk.LabelFrame(step, text="Step 2 — Choose a language")
         box.pack(fill=tk.BOTH, expand=True, padx=pad, pady=pad)
 
-        ttk.Label(box, text="Pick a language. Then click Next to choose a voice.").pack(
+        ttk.Label(box, text="Pick a language. The voice list updates automatically.").pack(
             anchor=tk.W, padx=pad, pady=(pad, 6)
         )
 
@@ -165,13 +165,11 @@ class AudioBookerGUI:
 
         row = ttk.Frame(box)
         row.pack(fill=tk.X, padx=pad, pady=(0, pad))
-        ttk.Button(row, text="Update voice list", command=self._apply_language_filter).pack(side=tk.LEFT)
-        ttk.Button(row, text="Refresh from internet", command=self._refresh_voices).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(row, text="Refresh from internet", command=self._refresh_voices).pack(side=tk.LEFT)
 
-        ttk.Label(
-            box,
-            text="Example: choose English to see all English voices.",
-        ).pack(anchor=tk.W, padx=pad, pady=(0, pad))
+        ttk.Label(box, text="Example: choose English to see all English voices.").pack(
+            anchor=tk.W, padx=pad, pady=(0, pad)
+        )
 
     def _build_step_3_voice(self, parent: ttk.Frame, pad: int) -> None:
         step = ttk.Frame(parent)
