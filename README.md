@@ -37,6 +37,12 @@ Then double-click it.
   - `ChapterName__part01.mp3`
   - `ChapterName__part02.mp3`
 
+## GUI runner (most intuitive)
+If you prefer clicking instead of typing paths, run `run_audio_booker_gui.bat`.
+- Pick input/output folders with Browse buttons
+- Choose a voice from a dropdown (with locale filtering)
+- Click “Run conversion”
+
 ## Audacity (optional polish)
 After generating MP3s, you can open them in Audacity to:
 - trim silence
