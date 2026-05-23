@@ -1,10 +1,15 @@
 import argparse
 import asyncio
+import sys
 import threading
+import time
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+
+# Add the app folder to sys.path so batch_tts can be found when run from any cwd
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 @dataclass(frozen=True)
@@ -52,7 +57,11 @@ def _default_output_for(input_dir: str) -> str:
 class AudioBookerGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Baxters Audio Booker")
+        _src_time = time.strftime(
+            "%Y-%m-%d %H:%M",
+            time.localtime(Path(__file__).stat().st_mtime),
+        )
+        self.root.title(f"Baxters Audio Booker  [code: {_src_time}]")
         self.root.geometry("760x520")
 
         self.voices: list[VoiceItem] = []
@@ -63,6 +72,8 @@ class AudioBookerGUI:
 
         self.step_index = 0
 
+        self.input_mode = tk.StringVar(value="pdf")   # "pdf" or "folder"
+        self.pdf_path = tk.StringVar(value="")
         self.input_dir = tk.StringVar(value=str(Path.home() / "Desktop"))
         self.output_dir = tk.StringVar(value=_default_output_for(self.input_dir.get()))
         self.language_choice = tk.StringVar(value="English (en)")
@@ -71,11 +82,24 @@ class AudioBookerGUI:
         self.max_chars = tk.IntVar(value=5500)
         self.max_chars_display = tk.StringVar(value=str(self.max_chars.get()))
 
+        self.output_format = tk.StringVar(value="split")   # "split" or "single"
+        self.merge_bitrate = tk.StringVar(value="160k")
+        self.merge_output = tk.StringVar(value="audiobook.mp3")
+        # legacy compat
+        self.merge_all = tk.BooleanVar(value=False)
+
+        self.offline_mode = tk.BooleanVar(value=False)  # Default to online (edge-tts)
+        self.coqui_model = tk.StringVar(value="tts_models/en/vctk/vits")
+        self.coqui_speaker = tk.StringVar(value="p226")  # Female voice
+
         self.status = tk.StringVar(value="Loading voices...")
+        self._running = False
+        self._start_time: float | None = None
+        self._timer_after_id: str | None = None
 
         self._build_wizard()
-        self._set_busy(True)
-        self._log("Loading voice list (needs internet)...")
+        self._set_busy(False)
+        self.status.set("Loading voices...")
         self._fetch_voices_threaded()
 
     def _build_wizard(self) -> None:
@@ -111,11 +135,14 @@ class AudioBookerGUI:
         self.open_out_btn = ttk.Button(nav, text="Open output folder", command=self._open_output)
         self.open_out_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        log_box = ttk.LabelFrame(self.root, text="What’s happening")
-        log_box.pack(fill=tk.BOTH, expand=False, padx=pad, pady=(0, pad))
+        log_box = ttk.LabelFrame(self.root, text="What's happening (progress updates appear here)")
+        log_box.pack(fill=tk.BOTH, expand=False, padx=pad, pady=(0, 4))
         self.log = tk.Text(log_box, height=10, wrap=tk.WORD)
         self.log.pack(fill=tk.BOTH, expand=True, padx=pad, pady=pad)
         self.log.configure(state=tk.DISABLED)
+
+        self.progress_bar = ttk.Progressbar(self.root, mode="indeterminate")
+        self.progress_bar.pack(fill=tk.X, padx=pad, pady=(0, 2))
 
         ttk.Label(self.root, textvariable=self.status).pack(fill=tk.X, padx=pad, pady=(0, pad))
 
@@ -125,25 +152,42 @@ class AudioBookerGUI:
         step = ttk.Frame(parent)
         self.steps.append(step)
 
-        box = ttk.LabelFrame(step, text="Step 1 — Pick your folders")
-        box.pack(fill=tk.BOTH, expand=True, padx=pad, pady=pad)
+        # ── Input source ──────────────────────────────────────────────────
+        src_box = ttk.LabelFrame(step, text="Step 1 — Choose your input")
+        src_box.pack(fill=tk.X, padx=pad, pady=(pad, 4))
 
-        ttk.Label(box, text="Input folder: this is where your chapter .txt files are.").pack(anchor=tk.W, padx=pad, pady=(pad, 2))
-        row = ttk.Frame(box)
-        row.pack(fill=tk.X, padx=pad, pady=(0, pad))
-        ttk.Entry(row, textvariable=self.input_dir).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row, text="Browse...", command=self._browse_input).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Radiobutton(src_box, text="PDF file  (recommended — chapters extracted automatically)",
+                        variable=self.input_mode, value="pdf",
+                        command=self._on_input_mode_changed).pack(
+            anchor=tk.W, padx=pad, pady=(pad, 2))
+        pdf_row = ttk.Frame(src_box)
+        pdf_row.pack(fill=tk.X, padx=(pad * 3, pad), pady=(0, pad))
+        self._pdf_path_var = self.pdf_path
+        ttk.Entry(pdf_row, textvariable=self.pdf_path, state="readonly").pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(pdf_row, text="Browse PDF…", command=self._browse_pdf).pack(
+            side=tk.LEFT, padx=(6, 0))
 
-        ttk.Label(box, text="Output folder: where the .mp3 files will be saved.").pack(anchor=tk.W, padx=pad, pady=(0, 2))
-        row = ttk.Frame(box)
-        row.pack(fill=tk.X, padx=pad, pady=(0, pad))
-        ttk.Entry(row, textvariable=self.output_dir).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(row, text="Browse...", command=self._browse_output).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Radiobutton(src_box, text="Text folder  (folder of .txt chapter files)",
+                        variable=self.input_mode, value="folder",
+                        command=self._on_input_mode_changed).pack(
+            anchor=tk.W, padx=pad, pady=(4, 2))
+        folder_row = ttk.Frame(src_box)
+        folder_row.pack(fill=tk.X, padx=(pad * 3, pad), pady=(0, pad))
+        ttk.Entry(folder_row, textvariable=self.input_dir).pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(folder_row, text="Browse folder…", command=self._browse_input).pack(
+            side=tk.LEFT, padx=(6, 0))
 
-        ttk.Label(
-            box,
-            text="Tip: keep one chapter per .txt file (Chapter 01.txt, Chapter 02.txt, etc.).",
-        ).pack(anchor=tk.W, padx=pad, pady=(0, pad))
+        # ── Output folder ─────────────────────────────────────────────────
+        out_box = ttk.LabelFrame(step, text="Output folder")
+        out_box.pack(fill=tk.X, padx=pad, pady=(4, pad))
+        out_row = ttk.Frame(out_box)
+        out_row.pack(fill=tk.X, padx=pad, pady=pad)
+        ttk.Entry(out_row, textvariable=self.output_dir).pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(out_row, text="Browse…", command=self._browse_output).pack(
+            side=tk.LEFT, padx=(6, 0))
 
     def _build_step_2_locale(self, parent: ttk.Frame, pad: int) -> None:
         step = ttk.Frame(parent)
@@ -197,25 +241,51 @@ class AudioBookerGUI:
         step = ttk.Frame(parent)
         self.steps.append(step)
 
-        box = ttk.LabelFrame(step, text="Step 4 — Settings and run")
-        box.pack(fill=tk.BOTH, expand=True, padx=pad, pady=pad)
+        # ── Output format ─────────────────────────────────────────────────
+        fmt_box = ttk.LabelFrame(step, text="Output format")
+        fmt_box.pack(fill=tk.X, padx=pad, pady=(pad, 4))
 
-        ttk.Label(box, text="Rate (speed): examples +0%, +10%, -10%.").pack(anchor=tk.W, padx=pad, pady=(pad, 2))
-        ttk.Entry(box, textvariable=self.rate, width=12).pack(anchor=tk.W, padx=pad)
+        ttk.Radiobutton(fmt_box,
+                        text="One MP3 per chapter  (numbered: 01 - Chapter Title.mp3, 02 - ..., etc.)",
+                        variable=self.output_format, value="split").pack(
+            anchor=tk.W, padx=pad, pady=(pad, 2))
+        ttk.Radiobutton(fmt_box,
+                        text="Single combined MP3  (all chapters merged into one file, requires ffmpeg)",
+                        variable=self.output_format, value="single").pack(
+            anchor=tk.W, padx=pad, pady=(2, 4))
 
-        ttk.Label(box, text="Volume: examples +0%, +10%, -10%.").pack(anchor=tk.W, padx=pad, pady=(pad, 2))
-        ttk.Entry(box, textvariable=self.volume, width=12).pack(anchor=tk.W, padx=pad)
+        single_row = ttk.Frame(fmt_box)
+        single_row.pack(fill=tk.X, padx=(pad * 3, pad), pady=(0, pad))
+        ttk.Label(single_row, text="Filename:").pack(side=tk.LEFT)
+        ttk.Entry(single_row, textvariable=self.merge_output, width=28).pack(
+            side=tk.LEFT, padx=(6, 16))
+        ttk.Label(single_row, text="Bitrate:").pack(side=tk.LEFT)
+        ttk.Entry(single_row, textvariable=self.merge_bitrate, width=8).pack(
+            side=tk.LEFT, padx=(6, 0))
 
-        row = ttk.Frame(box)
-        row.pack(fill=tk.X, padx=pad, pady=(pad, 0))
-        ttk.Label(row, text="Split long chapters (max chars per part):").pack(side=tk.LEFT)
-        ttk.Label(row, textvariable=self.max_chars_display).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(row, text="Change...", command=self._set_max_chars).pack(side=tk.LEFT, padx=(8, 0))
+        # ── Speed / volume ────────────────────────────────────────────────
+        settings_box = ttk.LabelFrame(step, text="Playback settings")
+        settings_box.pack(fill=tk.X, padx=pad, pady=(4, pad))
 
-        ttk.Label(
-            box,
-            text="Click Run to create MP3 files.",
-        ).pack(anchor=tk.W, padx=pad, pady=(pad, 0))
+        row = ttk.Frame(settings_box)
+        row.pack(fill=tk.X, padx=pad, pady=(pad, 4))
+        ttk.Label(row, text="Speed:").pack(side=tk.LEFT)
+        speed_cb = ttk.Combobox(row, textvariable=self.rate, state="readonly", width=16)
+        speed_cb["values"] = ["-25%", "-10%", "+0%", "+10%", "+25%", "+50%"]
+        speed_cb.set("+0%")
+        speed_cb.pack(side=tk.LEFT, padx=(6, 20))
+        ttk.Label(row, text="(+0% = normal, +10% = slightly faster)").pack(side=tk.LEFT)
+
+        row2 = ttk.Frame(settings_box)
+        row2.pack(fill=tk.X, padx=pad, pady=(0, pad))
+        ttk.Label(row2, text="Volume:").pack(side=tk.LEFT)
+        vol_cb = ttk.Combobox(row2, textvariable=self.volume, state="readonly", width=16)
+        vol_cb["values"] = ["-10%", "+0%", "+10%", "+20%"]
+        vol_cb.set("+0%")
+        vol_cb.pack(side=tk.LEFT, padx=(6, 0))
+
+        ttk.Label(step, text="Click Run when ready.",
+                  font=("Segoe UI", 9)).pack(anchor=tk.W, padx=pad, pady=(0, 4))
 
     def _show_step(self, index: int) -> None:
         index = max(0, min(index, len(self.steps) - 1))
@@ -261,18 +331,33 @@ class AudioBookerGUI:
     def _sync_nav_for_step_3(self) -> None:
         self.next_btn.configure(state=tk.NORMAL if self.selected_voice_short else tk.DISABLED)
 
+    def _on_input_mode_changed(self) -> None:
+        self._sync_nav_for_step_1()
+
     def _validate_step_1(self, silent: bool = False) -> bool:
-        in_dir = Path(self.input_dir.get()).expanduser().resolve()
-        if not in_dir.exists() or not in_dir.is_dir():
-            if not silent:
-                messagebox.showerror("Invalid input folder", str(in_dir))
-            return False
-        txt_files = list(in_dir.glob("*.txt"))
-        if not txt_files:
-            if not silent:
-                messagebox.showerror("No .txt files", f"No .txt files found in:\n{in_dir}")
-            return False
-        return True
+        if self.input_mode.get() == "pdf":
+            p = self.pdf_path.get().strip()
+            if not p:
+                if not silent:
+                    messagebox.showerror("No PDF selected", "Browse for a PDF file first.")
+                return False
+            if not Path(p).is_file():
+                if not silent:
+                    messagebox.showerror("PDF not found", f"File not found:\n{p}")
+                return False
+            return True
+        else:
+            in_dir = Path(self.input_dir.get()).expanduser().resolve()
+            if not in_dir.exists() or not in_dir.is_dir():
+                if not silent:
+                    messagebox.showerror("Invalid input folder", str(in_dir))
+                return False
+            txt_files = list(in_dir.glob("*.txt"))
+            if not txt_files:
+                if not silent:
+                    messagebox.showerror("No .txt files", f"No .txt files found in:\n{in_dir}")
+                return False
+            return True
 
     def _set_busy(self, busy: bool) -> None:
         state = tk.DISABLED if busy else tk.NORMAL
@@ -281,7 +366,14 @@ class AudioBookerGUI:
             self.open_out_btn.configure(state=state)
         except Exception:
             pass
-
+        try:
+            if busy:
+                self.progress_bar.start(12)
+            else:
+                self.progress_bar.stop()
+                self.progress_bar["value"] = 0
+        except Exception:
+            pass
     def _log(self, message: str) -> None:
         self.log.configure(state=tk.NORMAL)
         self.log.insert(tk.END, message + "\n")
@@ -300,6 +392,17 @@ class AudioBookerGUI:
         d = filedialog.askdirectory(title="Select output folder for .mp3")
         if d:
             self.output_dir.set(d)
+
+    def _browse_pdf(self) -> None:
+        p = filedialog.askopenfilename(
+            title="Select PDF file",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
+        if p:
+            self.pdf_path.set(p)
+            pdf_stem = Path(p).stem
+            self.output_dir.set(str(Path(p).parent / (pdf_stem + "_mp3")))
+            self.merge_output.set(pdf_stem + ".mp3")
+            self._sync_nav_for_step_1()
 
     def _open_output(self) -> None:
         out = Path(self.output_dir.get()).expanduser()
@@ -469,48 +572,142 @@ class AudioBookerGUI:
         self.voice_selected_label.set(f"Selected voice: {v.friendly_name} ({v.short_name})")
         self._sync_nav_for_step_3()
 
+    def _on_mode_changed(self) -> None:
+        if self.offline_mode.get():
+            self._log("Offline mode selected (Coqui TTS - neural voices)")
+            self.status.set("Offline mode - no internet required")
+        else:
+            self._log("Online mode selected (Edge TTS - requires internet)")
+            if not self.voices:
+                self._log("Loading voice list...")
+                self._fetch_voices_threaded()
+
     def _run(self) -> None:
-        in_dir = Path(self.input_dir.get()).expanduser().resolve()
-        out_dir = Path(self.output_dir.get()).expanduser().resolve()
-
-        if not in_dir.exists() or not in_dir.is_dir():
-            messagebox.showerror("Invalid input folder", str(in_dir))
-            return
-
-        txt_files = list(in_dir.glob("*.txt"))
-        if not txt_files:
-            messagebox.showerror("No .txt files found", f"No .txt files found in:\n{in_dir}")
-            return
-
         if not self.selected_voice_short:
-            messagebox.showerror("No voice selected", "Go back and pick a voice first.")
+            messagebox.showerror("No voice selected", "Go back to Step 3 and pick a voice first.")
             return
 
+        if self._running:
+            messagebox.showinfo("Already running", "Conversion is already in progress. Please wait for it to finish.")
+            return
+
+        out_dir = Path(self.output_dir.get()).expanduser().resolve()
+        do_merge = (self.output_format.get() == "single")
+        pdf_mode = (self.input_mode.get() == "pdf")
+
+        # capture values for thread
+        pdf_path_str = self.pdf_path.get().strip()
+        in_dir_str = self.input_dir.get()
+        voice = self.selected_voice_short
+        rate = self.rate.get()
+        volume = self.volume.get()
+        max_chars = int(self.max_chars.get())
+        merge_output = self.merge_output.get().strip() or "audiobook.mp3"
+        merge_bitrate = self.merge_bitrate.get().strip() or "160k"
+
+        self._running = True
+        self._start_time = time.time()
+        try:
+            self.run_btn.configure(state=tk.DISABLED)
+        except Exception:
+            pass
         self._set_busy(True)
-        self._log(f"Starting conversion for {len(txt_files)} file(s)...")
+        self._tick_timer()
+        self._log("--- Starting conversion ---")
+        self._log(f"Voice: {voice} | Rate: {rate} | Volume: {volume}")
+        if pdf_mode:
+            self._log(f"Input PDF: {pdf_path_str}")
+        else:
+            self._log(f"Input folder: {in_dir_str}")
+        self._log(f"Output folder: {out_dir}")
 
         def worker() -> None:
-            try:
-                from batch_tts import main_async
+            def progress_cb(msg: str) -> None:
+                self.root.after(0, lambda m=msg: self._log(m))
 
-                args = argparse.Namespace(
-                    input=str(in_dir),
-                    output=str(out_dir),
-                    voice=self.selected_voice_short,
-                    rate=self.rate.get(),
-                    volume=self.volume.get(),
-                    max_chars=int(self.max_chars.get()),
-                )
-                rc = asyncio.run(main_async(args))
+            try:
+                from batch_tts import main_async, extract_pdf_to_folder
+                import tempfile, shutil
+
+                if pdf_mode:
+                    tmp_dir = Path(tempfile.mkdtemp(prefix="baxter_audio_"))
+                    try:
+                        self.root.after(0, lambda: self._log("Extracting chapters from PDF..."))
+                        extract_pdf_to_folder(pdf_path_str, tmp_dir, progress_callback=progress_cb)
+                        in_dir = tmp_dir
+                        args = argparse.Namespace(
+                            input=str(in_dir),
+                            output=str(out_dir),
+                            offline=False,
+                            voice=voice,
+                            rate=rate,
+                            volume=volume,
+                            coqui_model="",
+                            coqui_speaker="",
+                            max_chars=max_chars,
+                            merge_all=do_merge,
+                            merge_output=merge_output,
+                            merge_bitrate=merge_bitrate,
+                        )
+                        rc = asyncio.run(main_async(args, progress_callback=progress_cb))
+                    finally:
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+                else:
+                    args = argparse.Namespace(
+                        input=in_dir_str,
+                        output=str(out_dir),
+                        offline=False,
+                        voice=voice,
+                        rate=rate,
+                        volume=volume,
+                        coqui_model="",
+                        coqui_speaker="",
+                        max_chars=max_chars,
+                        merge_all=do_merge,
+                        merge_output=merge_output,
+                        merge_bitrate=merge_bitrate,
+                    )
+                    rc = asyncio.run(main_async(args, progress_callback=progress_cb))
+
                 self.root.after(0, lambda: self._on_run_done(rc, out_dir))
             except Exception as e:
                 self.root.after(0, lambda: self._on_run_error(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _tick_timer(self) -> None:
+        if not self._running or self._start_time is None:
+            return
+        elapsed = int(time.time() - self._start_time)
+        mins, secs = divmod(elapsed, 60)
+        self.status.set(f"Running... {mins:02d}:{secs:02d} elapsed")
+        self._timer_after_id = self.root.after(1000, self._tick_timer)
+
+    def _stop_timer(self) -> str:
+        """Cancel the ticker and return a human-readable elapsed string."""
+        if self._timer_after_id is not None:
+            try:
+                self.root.after_cancel(self._timer_after_id)
+            except Exception:
+                pass
+            self._timer_after_id = None
+        if self._start_time is not None:
+            elapsed = int(time.time() - self._start_time)
+            mins, secs = divmod(elapsed, 60)
+            self._start_time = None
+            return f"{mins:02d}:{secs:02d}"
+        return "00:00"
+
     def _on_run_done(self, rc: int, out_dir: Path) -> None:
+        self._running = False
+        elapsed = self._stop_timer()
         self._set_busy(False)
-        self._log("Done.")
+        try:
+            self.run_btn.configure(state=tk.NORMAL)
+        except Exception:
+            pass
+        self.status.set(f"Done in {elapsed}")
+        self._log(f"--- Conversion complete! Total time: {elapsed} --- Output folder opened automatically. ---")
         if rc == 0:
             try:
                 import os
@@ -520,17 +717,57 @@ class AudioBookerGUI:
                 pass
 
     def _on_run_error(self, err: Exception) -> None:
+        self._running = False
+        elapsed = self._stop_timer()
         self._set_busy(False)
-        self._log(f"Error: {err}")
+        try:
+            self.run_btn.configure(state=tk.NORMAL)
+        except Exception:
+            pass
+        self.status.set(f"Failed after {elapsed}")
+        self._log(f"Error after {elapsed}: {err}")
         messagebox.showerror("Conversion failed", str(err))
 
 
+def _enforce_single_instance() -> object:
+    """Create a named mutex. If it already exists another instance is running — exit."""
+    import ctypes
+    ERROR_ALREADY_EXISTS = 183
+    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "BaxtersAudioBooker_SingleInstance")
+    if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        root = tk.Tk()
+        root.withdraw()
+        tk.messagebox.showinfo(
+            "Already running",
+            "Baxter's Audio Booker is already open.\nCheck your taskbar.")
+        root.destroy()
+        raise SystemExit(0)
+    return mutex  # keep alive — GC release would free the mutex
+
+
+def _set_app_icon(root: tk.Tk) -> None:
+    assets = Path(__file__).resolve().parent / "assets"
+    png = assets / "ear_icon_512.png"
+    if not png.exists():
+        return
+    try:
+        from PIL import Image, ImageTk
+        img = Image.open(png).resize((64, 64), Image.LANCZOS)
+        photo = ImageTk.PhotoImage(img)
+        root.iconphoto(True, photo)
+        root._icon_ref = photo  # keep reference so GC doesn't collect it
+    except Exception:
+        pass
+
+
 def main() -> int:
+    _mutex = _enforce_single_instance()  # blocks second instance before window opens
     root = tk.Tk()
     try:
         ttk.Style().theme_use("clam")
     except Exception:
         pass
+    _set_app_icon(root)
     AudioBookerGUI(root)
     root.mainloop()
     return 0
