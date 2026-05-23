@@ -1,14 +1,36 @@
 # Python
 __pycache__/
 *.pyc
+*.pyo
 
 # Virtual environments
 venv/
 .venv/
 
-# Output audio
+# Output audio / media (never commit generated or source media)
 output_mp3/
+*.mp3
+*.wav
+*.m4a
+*.ogg
+*.flac
+*.aac
+*.pdf
+
+# Dev / internal notes (stay local only)
+HANDOFF.md
+DEV_NOTES.md
+dev_notes.md
+TODO_LOCAL.md
+*.local.md
+project\ objective\ notes.txt
+roadmap.txt
+
+# Temp files
+*.tmp
+files.txt
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
